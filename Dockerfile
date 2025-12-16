@@ -1,50 +1,82 @@
-# Use Python 3.11 as recommended in the README
+# ==========================================
+# STAGE 1: Builder (Heavy lifting)
+# ==========================================
+FROM python:3.11-slim as builder
+
+# Set env to ensure downloads go to the right place
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    HF_HOME="/root/.cache/huggingface"
+
+WORKDIR /app
+
+# Install build dependencies (git, compilers for python libs, audio libs for caching script)
+# We need libsndfile1/ffmpeg here because builder.py imports the library to cache models
+RUN apt-get update && apt-get install -y \
+    git \
+    build-essential \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a virtual environment to isolate dependencies
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Clone the repository
+# We remove the .git directory immediately to save space (it can be large)
+RUN git clone https://github.com/resemble-ai/chatterbox.git . && \
+    rm -rf .git
+
+# Install dependencies into the virtual environment
+# We use standard install (.) instead of editable (-e) for cleaner packaging
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir .
+
+# Copy the builder script (CPU patched version)
+COPY builder.py .
+
+# Run the builder to download models into /root/.cache/huggingface
+# This uses the CPU-patched logic from builder.py
+RUN python builder.py
+
+# ==========================================
+# STAGE 2: Runtime (Slim and clean)
+# ==========================================
 FROM python:3.11-slim
 
-# Set environment variables
-# GRADIO_SERVER_NAME allows external access
+# Runtime environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     GRADIO_SERVER_NAME="0.0.0.0" \
     GRADIO_SERVER_PORT=7860 \
-    HF_HOME="/root/.cache/huggingface"
+    HF_HOME="/root/.cache/huggingface" \
+    # Add the virtual environment to the path
+    PATH="/opt/venv/bin:$PATH"
 
-# Install system dependencies
-# libsndfile1 is required for librosa
-# ffmpeg is required for general audio processing
-# git is required to clone the repo
-# build-essential for compiling C extensions if needed
-RUN apt-get update && apt-get install -y \
-    git \
-    libsndfile1 \
-    ffmpeg \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
-
-# Set working directory
 WORKDIR /app
 
-# Clone the repository
-RUN git clone https://github.com/resemble-ai/chatterbox.git .
+# Install ONLY runtime libraries (libsndfile/ffmpeg). 
+# git and build-essential are NOT installed here.
+RUN apt-get update && apt-get install -y \
+    libsndfile1 \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-# We install in editable mode as suggested, though standard install works too.
-# The pyproject.toml specifies torch==2.6.0
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -e .
+# Copy the virtual environment from the builder stage
+COPY --from=builder /opt/venv /opt/venv
 
-# Copy the builder script to pre-download models
-COPY builder.py /app/builder.py
+# Copy the cached models from the builder stage
+COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
 
-# Run the builder script to cache models into the Docker image layer
-# This prevents downloading 2GB+ of models every time the pod starts
-RUN python builder.py
+# Copy the application code from the builder stage
+COPY --from=builder /app /app
 
-# Copy startup script
+# Copy the start script
 COPY start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
-# Expose the Gradio port
+# Expose port
 EXPOSE 7860
 
 # Entrypoint
