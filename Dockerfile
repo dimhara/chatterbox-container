@@ -29,7 +29,8 @@ RUN git clone https://github.com/resemble-ai/chatterbox.git .
 
 # Install Python dependencies
 # We install in editable mode as suggested, though standard install works too.
-# The pyproject.toml specifies torch==2.6.0
+# The pyproject.toml specifies torch==2.6.0 -- it will only work as long as pytorch 2.6.0 is stable otherwise specify wheel in the toml or here
+# e.g. RUN pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124 or whatever
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -e .
 
