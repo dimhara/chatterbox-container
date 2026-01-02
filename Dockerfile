@@ -67,9 +67,10 @@ COPY --from=builder /app /app
 # Copy serverless handler
 COPY rp_handler.py /app/rp_handler.py
 # Copy main app
-COPY start.sh /app/start.sh
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
 
 EXPOSE 22
 
-# Default command (for pod mode — serverless ignores CMD) and just runs rp_handler..py
-CMD ["/app/start.sh"]
+# Default command (for pod mode — serverless ignores CMD) and should just run python rp_handler..py
+CMD ["/start.sh"]
