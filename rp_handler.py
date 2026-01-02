@@ -5,6 +5,7 @@ import torch
 import torchaudio
 from cryptography.fernet import Fernet
 from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+from chatterbox.vc import ChatterboxVC
 
 # --- CONFIGURATION ---
 ENCRYPTION_KEY = os.environ.get("ENCRYPTION_KEY")
@@ -12,11 +13,13 @@ if not ENCRYPTION_KEY:
     raise ValueError("ENCRYPTION_KEY environment variable is required")
 cipher_suite = Fernet(ENCRYPTION_KEY.encode())
 
-# --- MODEL LOADING (ONCE PER CONTAINER) ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"Loading ChatterboxMultilingualTTS on {DEVICE}...")
-MODEL = ChatterboxMultilingualTTS.from_pretrained(DEVICE)
-print("Model loaded.")
+print(f"Loading models on {DEVICE}...")
+
+# Load both models
+TTS_MODEL = ChatterboxMultilingualTTS.from_pretrained(DEVICE)
+VC_MODEL = ChatterboxVC.from_pretrained(DEVICE)
+print("Both TTS and VC models loaded successfully.")
 
 
 def decrypt_data(encrypted_str: str) -> bytes:
@@ -27,54 +30,52 @@ def encrypt_data(raw_bytes: bytes) -> str:
     return cipher_suite.encrypt(raw_bytes).decode()
 
 
-def load_reference_audio(encrypted_ref_b64: str):
-    """Decrypt and load reference audio into a temp-free tensor."""
-    decrypted_bytes = decrypt_data(encrypted_ref_b64)
+def load_audio_from_encrypted(encrypted_b64: str, target_sr: int = None):
+    """Helper: decrypt and load audio into tensor, optionally resample."""
+    decrypted_bytes = decrypt_data(encrypted_b64)
     audio_buffer = io.BytesIO(decrypted_bytes)
     wav, sr = torchaudio.load(audio_buffer)
-    # Resample to 24kHz if needed (Chatterbox expects 24kHz for reference)
-    if sr != 24000:
-        wav = torchaudio.functional.resample(wav, sr, 24000)
-    # Save to in-memory buffer for file-like path compatibility
+    
+    if target_sr and sr != target_sr:
+        wav = torchaudio.functional.resample(wav, sr, target_sr)
+        sr = target_sr
+    
+    # Return in-memory file-like object (required by Chatterbox APIs)
     temp_buffer = io.BytesIO()
-    torchaudio.save(temp_buffer, wav, 24000, format="wav")
+    torchaudio.save(temp_buffer, wav, sr, format="wav")
     temp_buffer.seek(0)
-    return temp_buffer
+    return temp_buffer, sr
 
 
-def handler(job):
-    job_input = job["input"]
-
-    # --- 1. VALIDATE & DECRYPT INPUTS ---
+def tts_handler(job_input):
+    """Handle Multilingual TTS requests."""
     encrypted_text = job_input.get("encrypted_text")
     language_id = job_input.get("language_id")
-    encrypted_ref_b64 = job_input.get("encrypted_reference_audio_b64")  # optional
+    encrypted_ref_b64 = job_input.get("encrypted_reference_audio_b64")
 
-    if not encrypted_text:
-        return {"error": "'encrypted_text' is required"}
-    if not language_id:
-        return {"error": "'language_id' is required"}
+    if not encrypted_text or not language_id:
+        return {"error": "TTS mode requires 'encrypted_text' and 'language_id'"}
 
     try:
         text = decrypt_data(encrypted_text).decode("utf-8")
-        print(f"Text decrypted. Generating in language: {language_id}")
+        print(f"TTS: Generating '{text[:50]}...' in language: {language_id}")
     except Exception as e:
         return {"error": "Failed to decrypt text", "details": str(e)}
 
-    # --- 2. PREPARE REFERENCE (IF PROVIDED) ---
+    # Optional reference audio
     audio_prompt_path = None
-    temp_ref_file = None
+    temp_ref = None
     if encrypted_ref_b64:
         try:
-            temp_ref_file = load_reference_audio(encrypted_ref_b64)
-            audio_prompt_path = temp_ref_file
+            temp_ref, _ = load_audio_from_encrypted(encrypted_ref_b64, target_sr=24000)
+            audio_prompt_path = temp_ref
         except Exception as e:
             return {"error": "Failed to process reference audio", "details": str(e)}
 
-    # --- 3. GENERATE AUDIO ---
+    # Generate
     try:
         if audio_prompt_path:
-            wav = MODEL.generate(
+            wav = TTS_MODEL.generate(
                 text=text,
                 language_id=language_id,
                 audio_prompt_path=audio_prompt_path,
@@ -83,8 +84,7 @@ def handler(job):
                 temperature=0.8
             )
         else:
-            # Use built-in default voice for the language
-            wav = MODEL.generate(
+            wav = TTS_MODEL.generate(
                 text=text,
                 language_id=language_id,
                 exaggeration=0.5,
@@ -92,27 +92,70 @@ def handler(job):
                 temperature=0.8
             )
     except Exception as e:
+        if temp_ref: temp_ref.close()
         return {"error": "TTS generation failed", "details": str(e)}
     finally:
-        # Ensure no reference buffer leaks
-        if temp_ref_file:
-            temp_ref_file.close()
+        if temp_ref: temp_ref.close()
 
-    # --- 4. ENCODE & ENCRYPT AUDIO IN-MEMORY ---
+    # Encrypt result
+    audio_buffer = io.BytesIO()
+    torchaudio.save(audio_buffer, wav, TTS_MODEL.sr, format="wav")
+    encrypted_audio = encrypt_data(audio_buffer.getvalue())
+    
+    return {"status": "success", "encrypted_audio": encrypted_audio}
+
+
+def vc_handler(job_input):
+    """Handle Voice Conversion requests."""
+    encrypted_source = job_input.get("encrypted_source_audio")
+    encrypted_target = job_input.get("encrypted_target_voice")
+
+    if not encrypted_source or not encrypted_target:
+        return {"error": "VC mode requires 'encrypted_source_audio' and 'encrypted_target_voice'"}
+
+    source_buffer = target_buffer = None
     try:
-        audio_buffer = io.BytesIO()
-        torchaudio.save(audio_buffer, wav, MODEL.sr, format="wav")
-        audio_bytes = audio_buffer.getvalue()
-        encrypted_audio = encrypt_data(audio_bytes)
+        # Load source audio (resample to VC model's expected rate: 16kHz)
+        source_buffer, _ = load_audio_from_encrypted(encrypted_source, target_sr=16000)
+        
+        # Load target voice (no resampling needed - VC handles internally)
+        target_buffer, _ = load_audio_from_encrypted(encrypted_target)
+        
+        print("VC: Converting voice...")
+        wav = VC_MODEL.generate(
+            audio=source_buffer,
+            target_voice_path=target_buffer
+        )
+        
     except Exception as e:
-        return {"error": "Failed to encode/encrypt output audio", "details": str(e)}
+        return {"error": "Voice conversion failed", "details": str(e)}
+    finally:
+        if source_buffer: source_buffer.close()
+        if target_buffer: target_buffer.close()
 
-    return {
-        "status": "success",
-        "encrypted_audio": encrypted_audio  # base64-encoded encrypted bytes
-    }
+    # Encrypt result
+    audio_buffer = io.BytesIO()
+    torchaudio.save(audio_buffer, wav, VC_MODEL.sr, format="wav")
+    encrypted_audio = encrypt_data(audio_buffer.getvalue())
+    
+    return {"status": "success", "encrypted_audio": encrypted_audio}
 
 
-# --- RUNPOD ENTRY POINT ---
+def handler(job):
+    """Unified handler routing based on 'mode' field."""
+    job_input = job["input"]
+    mode = job_input.get("mode", "tts").lower()  # default to TTS
+
+    if mode == "tts":
+        return tts_handler(job_input)
+    elif mode == "vc":
+        return vc_handler(job_input)
+    else:
+        return {
+            "error": "Invalid mode. Use 'tts' or 'vc'",
+            "available_modes": ["tts", "vc"]
+        }
+
+
 if __name__ == "__main__":
     runpod.serverless.start({"handler": handler})
