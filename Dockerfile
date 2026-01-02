@@ -66,6 +66,8 @@ COPY --from=builder /app /app
 
 # Copy serverless handler
 COPY rp_handler.py /app/rp_handler.py
+# Copy main app
+COPY start.sh /app/start.sh
 
 EXPOSE 22
 
