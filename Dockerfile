@@ -1,7 +1,7 @@
 # ==========================================
-# STAGE 1: Builder
+# STAGE 1: Builder (Download & Cache Models)
 # ==========================================
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -9,6 +9,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# Install build deps + git
 RUN apt-get update && apt-get install -y \
     git \
     build-essential \
@@ -16,51 +17,57 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Create and activate venv
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Clone and remove git history to save space
+# Clone Chatterbox source
 RUN git clone https://github.com/resemble-ai/chatterbox.git . && \
     rm -rf .git
 
-# Install with pip cache purge to save ~2.5GB of build space
+# Install package + deps (from source)
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir . && \
     pip cache purge
 
+# Copy and run model downloader (CPU-patched)
 COPY builder.py .
-
-# Run the builder (CPU-patched)
 RUN python builder.py
 
+
 # ==========================================
-# STAGE 2: Runtime
+# STAGE 2: Runtime (Minimal + Serverless)
 # ==========================================
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    GRADIO_SERVER_NAME="0.0.0.0" \
-    GRADIO_SERVER_PORT=7860 \
     HF_HOME="/root/.cache/huggingface" \
     PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 
-# Only runtime libs
+# Install ONLY runtime deps
 RUN apt-get update && apt-get install -y \
     libsndfile1 \
     ffmpeg \
+    openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy artifacts from builder
+# Install Python deps for serverless handler
+RUN python -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir runpod cryptography
+
+# Copy from builder
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
 COPY --from=builder /app /app
 
-COPY start.sh /app/start.sh
-RUN chmod +x /app/start.sh
+# Copy serverless handler
+COPY rp_handler.py /app/rp_handler.py
 
-EXPOSE 7860
+EXPOSE 22
 
+# Default command (for pod mode — serverless ignores CMD) and just runs rp_handler..py
 CMD ["/app/start.sh"]
