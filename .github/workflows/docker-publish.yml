@@ -1,14 +1,9 @@
-name: Build and Publish to GHCR
+name: Build and Publish (CPU Only)
 
 on:
   push:
     branches: [ "main", "master" ]
-    tags: [ 'v*.*.*' ]
   workflow_dispatch:
-
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-push:
@@ -19,30 +14,10 @@ jobs:
       packages: write
 
     steps:
-      # --- MANUALLY FREE DISK SPACE ---
-      - name: Free Disk Space (Remove Android, .NET, Haskell)
+      - name: Manual Disk Cleanup
         run: |
-          echo "Disk space before cleanup:"
-          df -h
-          
-          # Remove Android SDKs and Tools (~11GB)
-          sudo rm -rf /usr/local/lib/android
-          
-          # Remove .NET runtimes (~1.5GB)
-          sudo rm -rf /usr/share/dotnet
-          
-          # Remove Haskell (~2GB)
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/.ghcup
-          
-          # Remove CodeQL (~2GB)
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          
-          # Remove Docker images pre-cached on the runner (Node, Alpine, etc.)
-          # We only need the base python image which we pull later.
-          sudo docker system prune -a -f
-          
-          echo "Disk space after cleanup:"
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force
           df -h
 
       - name: Checkout repository
@@ -51,29 +26,22 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to the Container registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels) for Docker
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
-            type=ref,event=tag
-            type=sha,prefix=sha-
-
-      - name: Build and push Docker image
+      - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:latest-cpu
+          build-args: RUNTIME=cpu
+          # Using registry-based caching for reliability
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:cache-cpu
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:cache-cpu,mode=min

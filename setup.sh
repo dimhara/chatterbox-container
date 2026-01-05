@@ -1,87 +1,51 @@
 #!/bin/bash
-
-# Exit on error
 set -e
 
-# 1. Install uv (assuming pip is available)
-echo "--- Installing uv ---"
+echo "--- 🛠️  Local Setup Started ---"
+
+# 1. Install uv
 pip install uv
+UV_CMD=$(which uv) || UV_CMD="$HOME/.local/bin/uv"
 
-# Find the installed uv executable.
-# It's usually in ~/.local/bin for user installs.
-UV_CMD=$(which uv)
-if [ -z "$UV_CMD" ]; then
-  echo "Could not find 'uv' after installation. Trying a common path."
-  UV_CMD="$HOME/.local/bin/uv"
-fi
-
-if [ ! -f "$UV_CMD" ]; then
-  echo "Failed to locate uv executable. Exiting."
-  exit 1
-fi
-echo "Found uv executable at: $UV_CMD"
-
-
-# 2. Install system dependencies
-echo "--- Installing system dependencies ---"
-sudo apt-get update && sudo apt-get install -y \
-    git \
-    build-essential \
-    libsndfile1 \
-    ffmpeg
-
-# 3. Create a virtual environment
+# 2. Create venv
 echo "--- Creating virtual environment ---"
-# Ensure the target directory is clean and we have permissions
-sudo rm -rf /opt/venv
-sudo mkdir -p /opt/venv
-sudo chown $USER:$USER /opt/venv
-$UV_CMD venv /opt/venv
+rm -rf .venv
+$UV_CMD venv .venv
+VENV_PYTHON=".venv/bin/python"
+VENV_PIP=".venv/bin/pip"
 
-VENV_PYTHON="/opt/venv/bin/python"
-
-# 4. Install PyTorch CPU
-echo "--- Installing PyTorch CPU ---"
-$UV_CMD pip install \
-    --python $VENV_PYTHON \
+# 3. Install PyTorch CPU & HF Tools
+echo "--- Installing Dependencies ---"
+$UV_CMD pip install --python $VENV_PYTHON \
     --index-url https://download.pytorch.org/whl/cpu \
-    torch \
-    torchaudio
+    torch torchaudio
+    
+$UV_CMD pip install --python $VENV_PYTHON \
+    "huggingface_hub[cli]" hf_transfer runpod cryptography
 
-# 5. Clone and install Chatterbox
-echo "--- Installing Chatterbox ---"
-# Clone to a temporary directory
-TMP_DIR=$(mktemp -d)
-git clone https://github.com/resemble-ai/chatterbox.git $TMP_DIR/chatterbox
+# 4. Clone & Patch Chatterbox (Matching Dockerfile logic)
+echo "--- Cloning and Patching Chatterbox ---"
+if [ -d "chatterbox" ]; then rm -rf chatterbox; fi
+git clone https://github.com/resemble-ai/chatterbox.git
 
-# Patch chatterbox's numpy dependency for Python 3.12+
-echo "--- Patching Chatterbox for Python 3.12+ compatibility ---"
-sed -i 's/numpy>=1.24.0,<1.26.0/numpy>=1.26.0/' $TMP_DIR/chatterbox/pyproject.toml
+# Patch 1: Numpy constraint
+sed -i 's/numpy>=1.24.0,<1.26.0/numpy>=1.26.0/' chatterbox/pyproject.toml
 
-$UV_CMD pip install \
-    --python $VENV_PYTHON \
-    $TMP_DIR/chatterbox
+# Patch 2: CPU Map Location (Note: Local path is chatterbox/src/..., not /app/src/...)
+sed -i 's/torch\.load(ckpt_dir \/ "ve\.pt", weights_only=True)/torch.load(ckpt_dir \/ "ve.pt", map_location=device, weights_only=True)/' chatterbox/src/chatterbox/mtl_tts.py
+sed -i 's/torch\.load(ckpt_dir \/ "s3gen\.pt", weights_only=True)/torch.load(ckpt_dir \/ "s3gen.pt", map_location=device, weights_only=True)/' chatterbox/src/chatterbox/mtl_tts.py
+sed -i 's/torch\.load(ckpt_dir \/ "vc_model\.pt")/torch.load(ckpt_dir \/ "vc_model.pt", map_location=device)/' chatterbox/src/chatterbox/vc.py
 
-# 6. Install other Python dependencies
-echo "--- Installing other Python dependencies ---"
-$UV_CMD pip install \
-    --python $VENV_PYTHON \
-    runpod cryptography
+# 5. Install Chatterbox
+$UV_CMD pip install --python $VENV_PYTHON chatterbox/
 
-# 7. Patch chatterbox after installation
-echo "--- Patching Chatterbox for CPU loading ---"
-SITE_PACKAGES=$($VENV_PYTHON -c "import site; print(site.getsitepackages()[0])")
-TTS_MODEL_PATH="$SITE_PACKAGES/chatterbox/mtl_tts.py"
-VC_MODEL_PATH="$SITE_PACKAGES/chatterbox/vc.py"
+# 6. Cache PKUSEG
+$VENV_PYTHON -c "import spacy_pkuseg; spacy_pkuseg.pkuseg()"
 
-# Patch for the TTS model
-sed -i 's/torch\.load(ckpt_dir \/ "s3gen\.pt", weights_only=True)/torch.load(ckpt_dir \/ "s3gen.pt", map_location=device, weights_only=True)/' $TTS_MODEL_PATH
+# 7. Download Models using the shared script
+echo "--- Downloading Models ---"
+# We need to activate the venv context for the script to find 'huggingface-cli'
+source .venv/bin/activate
+./download_models.sh
 
-# Proactive patch for the VC model
-sed -i 's/torch\.load(ckpt_dir \/ "vc_model\.pt")/torch.load(ckpt_dir \/ "vc_model.pt", map_location=device)/' $VC_MODEL_PATH
-
-# 8. Clean up
-echo "--- Cleaning up ---"
-rm -rf $TMP_DIR
-
-echo "--- Setup complete ---"
+echo "--- ✅ Setup Complete. Run 'source .venv/bin/activate' then 'python debug_local.py' ---"

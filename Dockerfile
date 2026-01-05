@@ -1,72 +1,73 @@
+ARG RUNTIME=cpu
+
 # ==========================================
 # STAGE 1: Builder
 # ==========================================
 FROM python:3.11-slim AS builder
+ARG RUNTIME
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    HF_HOME="/root/.cache/huggingface" \
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT="/opt/venv"
 
 WORKDIR /app
-
-# Install uv and system build deps
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN apt-get update && apt-get install -y \
-    git build-essential libsndfile1 ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create a virtual environment via uv
+RUN apt-get update && apt-get install -y git build-essential libsndfile1 ffmpeg && rm -rf /var/lib/apt/lists/*
 RUN uv venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# 1. Install PyTorch CPU first (Critical for keeping image size down)
-RUN uv pip install \
-    --index-url https://download.pytorch.org/whl/cpu \
-    torch torchaudio
+# Install Torch
+RUN if [ "$RUNTIME" = "cpu" ]; then \
+        uv pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio; \
+    else \
+        uv pip install torch torchaudio; \
+    fi && uv cache clean
 
-# 2. Clone and install Chatterbox
-RUN git clone https://github.com/resemble-ai/chatterbox.git . && \
-    uv pip install .
+# Install & Patch Chatterbox
+RUN git clone https://github.com/resemble-ai/chatterbox.git .
+RUN sed -i 's/numpy>=1.24.0,<1.26.0/numpy>=1.26.0/' pyproject.toml && \
+    sed -i 's/torch\.load(ckpt_dir \/ "ve\.pt", weights_only=True)/torch.load(ckpt_dir \/ "ve.pt", map_location=device, weights_only=True)/' src/chatterbox/mtl_tts.py && \
+    sed -i 's/torch\.load(ckpt_dir \/ "s3gen\.pt", weights_only=True)/torch.load(ckpt_dir \/ "s3gen.pt", map_location=device, weights_only=True)/' src/chatterbox/mtl_tts.py && \
+    sed -i 's/torch\.load(ckpt_dir \/ "vc_model\.pt")/torch.load(ckpt_dir \/ "vc_model.pt", map_location=device)/' src/chatterbox/vc.py
 
-# 3. Copy and run model downloader
-# The builder.py script uses the patched torch.load to ensure CPU safety
-COPY builder.py .
-RUN python builder.py
+RUN uv pip install . && uv cache clean
+# Cache pkuseg
+RUN python -c "import spacy_pkuseg; spacy_pkuseg.pkuseg()"
 
 # ==========================================
 # STAGE 2: Runtime
 # ==========================================
 FROM python:3.11-slim
+ARG RUNTIME
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME="/root/.cache/huggingface" \
     PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
 
-# Install ONLY minimal runtime deps (no git/build-essential)
 RUN apt-get update && apt-get install -y \
     libsndfile1 \
     ffmpeg \
+    openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the venv and cached models from builder
 COPY --from=builder /opt/venv /opt/venv
-COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
 COPY --from=builder /root/.pkuseg /root/.pkuseg
 COPY --from=builder /app /app
 
-# Install serverless support into the venv using uv (fast)
+# Install CLI tools
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/
-RUN uv pip install runpod cryptography
+RUN uv pip install runpod cryptography "huggingface_hub[cli]" hf_transfer && uv cache clean
 
-# Copy scripts
+# Copy Scripts
 COPY rp_handler.py /app/rp_handler.py
+COPY download_models.sh /app/download_models.sh
+COPY start_serverless.sh /app/start_serverless.sh
 COPY start.sh /start.sh
-RUN chmod +x /start.sh
 
-# Fix: Ensure we run the handler, not just sleep forever
-# Using -u for unbuffered logs in RunPod
-CMD ["python", "-u", "rp_handler.py"]
+# Permissions
+RUN chmod +x /app/download_models.sh /app/start_serverless.sh /start.sh
+
+# Default to Serverless mode
+CMD ["/app/start_serverless.sh"]

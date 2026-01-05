@@ -82,6 +82,9 @@ export_env_vars
 
 execute_script "/post_start.sh" "Running post-start script..."
 
+# Download Models with "hf cli" (fast)
+execute_script "/app/download_models.sh"  "Downloading models with hf cli."
+
 echo "Start script(s) finished, Pod is ready to use."
 
 sleep infinity
