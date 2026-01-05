@@ -39,12 +39,13 @@ def test_vc(encrypted_source_audio):
     # Decrypt the source we just made
     raw_audio = decrypt(encrypted_source_audio)
     source_buf = io.BytesIO(raw_audio)
+    target_buf = io.BytesIO(raw_audio)
     
     # For VC, we need a 'target' voice. We will use the same audio for debugging purposes
     # as the 'target_voice_path' argument.
     wav = vc_model.generate(
         audio=source_buf,
-        target_voice_path=source_buf
+        target_voice_path=target_buf
     )
     
     output_path = "debug_output_vc.wav"
