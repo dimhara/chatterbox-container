@@ -28,6 +28,7 @@ This is the default mode of the container. It is designed to scale to zero and l
 *   **Container Start Command**: Leave empty (Defaults to `/app/start_serverless.sh`).
 *   **Environment Variables**:
     *   `ENCRYPTION_KEY`: **(Required)** A Fernet 32-byte URL-safe base64-encoded key.
+* **MODEL**: Supports the value "ResembleAI/chatterbox" for fast HF caching
 
 ### Generating an Encryption Key
 The handler requires encrypted payloads. Generate a key using Python:
@@ -51,6 +52,13 @@ The handler accepts inputs for **TTS** (Text-to-Speech) and **VC** (Voice Conver
   }
 }
 ```
+
+---
+
+## 2. RunPod Pod Deployment (Interactive)
+
+Just change the start command to `/start.sh`
+
 ---
 
 ## 3. Local Development (Testing)

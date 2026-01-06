@@ -1,4 +1,4 @@
-name: Build and Publish (CPU Only)
+name: Build and Publish
 
 on:
   push:
@@ -8,7 +8,12 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    
+    strategy:
+      fail-fast: false
+      matrix:
+        # Define two flavors
+        runtime: [cpu, cuda]
+
     permissions:
       contents: read
       packages: write
@@ -16,6 +21,7 @@ jobs:
     steps:
       - name: Manual Disk Cleanup
         run: |
+          echo "Freeing disk space..."
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           sudo docker image prune --all --force
           df -h
@@ -38,10 +44,16 @@ jobs:
         with:
           context: .
           push: true
+          # Create tags based on the matrix: :latest-cpu, :latest-cuda
+          # Also tag :latest for the cuda version (default)
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:latest-cpu
-          build-args: RUNTIME=cpu
-          # Using registry-based caching for reliability
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:cache-cpu
-          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:cache-cpu,mode=min
+            ghcr.io/${{ github.repository }}:latest-${{ matrix.runtime }}
+            ${{ matrix.runtime == 'cuda' && format('ghcr.io/{0}:latest', github.repository) || '' }}
+          
+          # Pass the matrix value to the Dockerfile
+          build-args: RUNTIME=${{ matrix.runtime }}
+          
+          # Use separate caches for cpu and cuda to prevent conflicts
+          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:cache-${{ matrix.runtime }}
+          # Keep mode=min to save disk space on the runner
+          cache-to: type=registry,ref=ghcr.io/${{ github.repository }}:cache-${{ matrix.runtime }},mode=min
