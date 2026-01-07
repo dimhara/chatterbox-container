@@ -63,7 +63,7 @@ def load_audio_from_encrypted(encrypted_b64: str, target_sr: int = None):
 
 
 def tts_handler(job_input):
-    """Handle Multilingual TTS requests with Opus output."""
+    """Handle Multilingual TTS requests with ogg output."""
     encrypted_text = job_input.get("encrypted_text")
     language_id = job_input.get("language_id")
     encrypted_ref_b64 = job_input.get("encrypted_reference_audio_b64")
@@ -98,12 +98,12 @@ def tts_handler(job_input):
             temperature=0.8
         )
         
-        # Save output as Opus for bandwidth efficiency
+        # Save output as ogg for bandwidth efficiency
         audio_buffer = io.BytesIO()
         torchaudio.save(audio_buffer, wav, TTS_MODEL.sr, format="ogg")
         encrypted_audio = encrypt_data(audio_buffer.getvalue())
         
-        return {"status": "success", "format": "opus", "encrypted_audio": encrypted_audio}
+        return {"status": "success", "format": "ogg", "encrypted_audio": encrypted_audio}
 
     except Exception as e:
         return {"error": "TTS generation failed", "details": str(e)}
@@ -112,7 +112,7 @@ def tts_handler(job_input):
 
 
 def vc_handler(job_input):
-    """Handle Voice Conversion requests with Opus output."""
+    """Handle Voice Conversion requests with ogg output."""
     encrypted_source = job_input.get("encrypted_source_audio")
     encrypted_target = job_input.get("encrypted_target_voice")
 
@@ -131,9 +131,9 @@ def vc_handler(job_input):
             target_voice_path=target_buffer
         )
         
-        # Save output as Opus
+        # Save output as ogg
         audio_buffer = io.BytesIO()
-        torchaudio.save(audio_buffer, wav, VC_MODEL.sr, format="opus")
+        torchaudio.save(audio_buffer, wav, VC_MODEL.sr, format="ogg")
         encrypted_audio = encrypt_data(audio_buffer.getvalue())
         
         return {"status": "success", "format": "ogg", "encrypted_audio": encrypted_audio}
